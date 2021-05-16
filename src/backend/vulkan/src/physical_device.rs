@@ -15,6 +15,7 @@ use hal::{
 
 use std::{ffi::CStr, fmt, mem, ptr, sync::Arc};
 
+use super::Instance;
 use crate::{
     conv, info, Backend, Device, DeviceExtensionFunctions, ExtensionFn, Queue, QueueFamily,
     RawDevice, RawInstance, Version,
@@ -678,11 +679,62 @@ pub struct PhysicalDevice {
     available_features: Features,
 }
 
+impl PhysicalDevice {
+    pub fn device_info(&self) -> &PhysicalDeviceInfo {
+        &self.device_info
+    }
+
+    pub fn raw(&self) -> vk::PhysicalDevice {
+        self.handle
+    }
+
+    /// # Safety
+    /// `raw_physical_device` must be created from `instance`
+    pub unsafe fn from_raw(instance: Instance, raw_physical_device: vk::PhysicalDevice) -> Self {
+        PhysicalDevice::inner_create(&instance.raw, raw_physical_device)
+    }
+
+    fn inner_create(instance: &Arc<RawInstance>, device: vk::PhysicalDevice) -> Self {
+        let (device_info, device_features) = PhysicalDeviceInfo::load(instance, device);
+
+        let available_features = {
+            let mut bits = device_features.to_hal_features(&device_info);
+
+            // see https://github.com/gfx-rs/gfx/issues/1930
+            let is_windows_intel_dual_src_bug = cfg!(windows)
+                && device_info.properties.vendor_id == info::intel::VENDOR
+                && (device_info.properties.device_id & info::intel::DEVICE_KABY_LAKE_MASK
+                    == info::intel::DEVICE_KABY_LAKE_MASK
+                    || device_info.properties.device_id & info::intel::DEVICE_SKY_LAKE_MASK
+                        == info::intel::DEVICE_SKY_LAKE_MASK);
+            if is_windows_intel_dual_src_bug {
+                bits.set(Features::DUAL_SRC_BLENDING, false);
+            }
+
+            bits
+        };
+
+        PhysicalDevice {
+            instance: instance.clone(),
+            handle: device,
+            known_memory_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL
+                | vk::MemoryPropertyFlags::HOST_VISIBLE
+                | vk::MemoryPropertyFlags::HOST_COHERENT
+                | vk::MemoryPropertyFlags::HOST_CACHED
+                | vk::MemoryPropertyFlags::LAZILY_ALLOCATED,
+            device_info: device_info,
+            device_features,
+            available_features,
+        }
+    }
+}
+
 pub(crate) fn load_adapter(
     instance: &Arc<RawInstance>,
     device: vk::PhysicalDevice,
 ) -> adapter::Adapter<Backend> {
-    let (device_info, device_features) = PhysicalDeviceInfo::load(instance, device);
+    let physical_device = PhysicalDevice::inner_create(instance, device);
+    let device_info = physical_device.device_info();
 
     let info = adapter::AdapterInfo {
         name: unsafe {
@@ -701,36 +753,6 @@ pub(crate) fn load_adapter(
             ash::vk::PhysicalDeviceType::CPU => adapter::DeviceType::Cpu,
             _ => adapter::DeviceType::Other,
         },
-    };
-
-    let available_features = {
-        let mut bits = device_features.to_hal_features(&device_info);
-
-        // see https://github.com/gfx-rs/gfx/issues/1930
-        let is_windows_intel_dual_src_bug = cfg!(windows)
-            && device_info.properties.vendor_id == info::intel::VENDOR
-            && (device_info.properties.device_id & info::intel::DEVICE_KABY_LAKE_MASK
-                == info::intel::DEVICE_KABY_LAKE_MASK
-                || device_info.properties.device_id & info::intel::DEVICE_SKY_LAKE_MASK
-                    == info::intel::DEVICE_SKY_LAKE_MASK);
-        if is_windows_intel_dual_src_bug {
-            bits.set(Features::DUAL_SRC_BLENDING, false);
-        }
-
-        bits
-    };
-
-    let physical_device = PhysicalDevice {
-        instance: instance.clone(),
-        handle: device,
-        known_memory_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL
-            | vk::MemoryPropertyFlags::HOST_VISIBLE
-            | vk::MemoryPropertyFlags::HOST_COHERENT
-            | vk::MemoryPropertyFlags::HOST_CACHED
-            | vk::MemoryPropertyFlags::LAZILY_ALLOCATED,
-        device_info,
-        device_features,
-        available_features,
     };
 
     let queue_families = unsafe {
