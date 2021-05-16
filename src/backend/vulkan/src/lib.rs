@@ -353,6 +353,89 @@ unsafe extern "system" fn debug_report_callback(
     vk::FALSE
 }
 
+impl Instance {
+    pub unsafe fn raw(&self) -> ash::Instance {
+        self.raw.inner.clone()
+    }
+
+    /// # Safety
+    /// `extensions` must be the list of extensions used to create `raw_instance`
+    pub unsafe fn from_raw(
+        #[cfg(not(feature = "use-rtld-next"))] entry: Entry,
+        #[cfg(feature = "use-rtld-next")] entry: EntryCustom<()>,
+        raw_instance: ash::Instance,
+        extensions: Vec<&'static CStr>,
+    ) -> Result<Self, hal::UnsupportedBackend> {
+        Instance::inner_create(entry, raw_instance, extensions)
+    }
+
+    fn inner_create(
+        #[cfg(not(feature = "use-rtld-next"))] entry: Entry,
+        #[cfg(feature = "use-rtld-next")] entry: EntryCustom<()>,
+        instance: ash::Instance,
+        extensions: Vec<&'static CStr>,
+    ) -> Result<Self, hal::UnsupportedBackend> {
+        let instance_extensions = entry
+            .enumerate_instance_extension_properties()
+            .map_err(|e| {
+                info!("Unable to enumerate instance extensions: {:?}", e);
+                hal::UnsupportedBackend
+            })?;
+
+        let get_physical_device_properties = extensions
+            .iter()
+            .find(|&&ext| ext == vk::KhrGetPhysicalDeviceProperties2Fn::name())
+            .map(|_| {
+                vk::KhrGetPhysicalDeviceProperties2Fn::load(|name| unsafe {
+                    std::mem::transmute(
+                        entry.get_instance_proc_addr(instance.handle(), name.as_ptr()),
+                    )
+                })
+            });
+
+        #[allow(deprecated)] // `DebugReport`
+        let debug_messenger = {
+            // make sure VK_EXT_debug_utils is available
+            if instance_extensions.iter().any(|props| unsafe {
+                CStr::from_ptr(props.extension_name.as_ptr()) == ext::DebugUtils::name()
+            }) {
+                let ext = ext::DebugUtils::new(&entry, &instance);
+                let info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
+                    .flags(vk::DebugUtilsMessengerCreateFlagsEXT::empty())
+                    .message_severity(vk::DebugUtilsMessageSeverityFlagsEXT::all())
+                    .message_type(vk::DebugUtilsMessageTypeFlagsEXT::all())
+                    .pfn_user_callback(Some(debug_utils_messenger_callback));
+                let handle = unsafe { ext.create_debug_utils_messenger(&info, None) }.unwrap();
+                Some(DebugMessenger::Utils(ext, handle))
+            } else if cfg!(debug_assertions)
+                && instance_extensions.iter().any(|props| unsafe {
+                    CStr::from_ptr(props.extension_name.as_ptr()) == ext::DebugReport::name()
+                })
+            {
+                let ext = ext::DebugReport::new(&entry, &instance);
+                let info = vk::DebugReportCallbackCreateInfoEXT::builder()
+                    .flags(vk::DebugReportFlagsEXT::all())
+                    .pfn_callback(Some(debug_report_callback));
+                let handle = unsafe { ext.create_debug_report_callback(&info, None) }.unwrap();
+                Some(DebugMessenger::Report(ext, handle))
+            } else {
+                None
+            }
+        };
+
+        Ok(Instance {
+            raw: Arc::new(RawInstance {
+                inner: instance,
+                debug_messenger,
+                get_physical_device_properties,
+                render_doc_entry: unsafe { load_renderdoc_entrypoint() },
+            }),
+            extensions,
+            entry,
+        })
+    }
+}
+
 impl hal::Instance<Backend> for Instance {
     fn create(name: &str, version: u32) -> Result<Self, hal::UnsupportedBackend> {
         #[cfg(not(feature = "use-rtld-next"))]
@@ -531,57 +614,7 @@ impl hal::Instance<Backend> for Instance {
             })?
         };
 
-        let get_physical_device_properties = extensions
-            .iter()
-            .find(|&&ext| ext == vk::KhrGetPhysicalDeviceProperties2Fn::name())
-            .map(|_| {
-                vk::KhrGetPhysicalDeviceProperties2Fn::load(|name| unsafe {
-                    std::mem::transmute(
-                        entry.get_instance_proc_addr(instance.handle(), name.as_ptr()),
-                    )
-                })
-            });
-
-        #[allow(deprecated)] // `DebugReport`
-        let debug_messenger = {
-            // make sure VK_EXT_debug_utils is available
-            if instance_extensions.iter().any(|props| unsafe {
-                CStr::from_ptr(props.extension_name.as_ptr()) == ext::DebugUtils::name()
-            }) {
-                let ext = ext::DebugUtils::new(&entry, &instance);
-                let info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
-                    .flags(vk::DebugUtilsMessengerCreateFlagsEXT::empty())
-                    .message_severity(vk::DebugUtilsMessageSeverityFlagsEXT::all())
-                    .message_type(vk::DebugUtilsMessageTypeFlagsEXT::all())
-                    .pfn_user_callback(Some(debug_utils_messenger_callback));
-                let handle = unsafe { ext.create_debug_utils_messenger(&info, None) }.unwrap();
-                Some(DebugMessenger::Utils(ext, handle))
-            } else if cfg!(debug_assertions)
-                && instance_extensions.iter().any(|props| unsafe {
-                    CStr::from_ptr(props.extension_name.as_ptr()) == ext::DebugReport::name()
-                })
-            {
-                let ext = ext::DebugReport::new(&entry, &instance);
-                let info = vk::DebugReportCallbackCreateInfoEXT::builder()
-                    .flags(vk::DebugReportFlagsEXT::all())
-                    .pfn_callback(Some(debug_report_callback));
-                let handle = unsafe { ext.create_debug_report_callback(&info, None) }.unwrap();
-                Some(DebugMessenger::Report(ext, handle))
-            } else {
-                None
-            }
-        };
-
-        Ok(Instance {
-            raw: Arc::new(RawInstance {
-                inner: instance,
-                debug_messenger,
-                get_physical_device_properties,
-                render_doc_entry: unsafe { load_renderdoc_entrypoint() },
-            }),
-            extensions,
-            entry,
-        })
+        Instance::inner_create(entry, instance, extensions)
     }
 
     fn enumerate_adapters(&self) -> Vec<adapter::Adapter<Backend>> {
