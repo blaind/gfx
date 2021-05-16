@@ -680,10 +680,6 @@ pub struct PhysicalDevice {
 }
 
 impl PhysicalDevice {
-    pub fn device_info(&self) -> &PhysicalDeviceInfo {
-        &self.device_info
-    }
-
     pub fn raw(&self) -> vk::PhysicalDevice {
         self.handle
     }
@@ -727,100 +723,27 @@ impl PhysicalDevice {
             available_features,
         }
     }
-}
 
-pub(crate) fn load_adapter(
-    instance: &Arc<RawInstance>,
-    device: vk::PhysicalDevice,
-) -> adapter::Adapter<Backend> {
-    let physical_device = PhysicalDevice::inner_create(instance, device);
-    let device_info = physical_device.device_info();
-
-    let info = adapter::AdapterInfo {
-        name: unsafe {
-            CStr::from_ptr(device_info.properties.device_name.as_ptr())
-                .to_str()
-                .unwrap_or("Unknown")
-                .to_owned()
-        },
-        vendor: device_info.properties.vendor_id as usize,
-        device: device_info.properties.device_id as usize,
-        device_type: match device_info.properties.device_type {
-            ash::vk::PhysicalDeviceType::OTHER => adapter::DeviceType::Other,
-            ash::vk::PhysicalDeviceType::INTEGRATED_GPU => adapter::DeviceType::IntegratedGpu,
-            ash::vk::PhysicalDeviceType::DISCRETE_GPU => adapter::DeviceType::DiscreteGpu,
-            ash::vk::PhysicalDeviceType::VIRTUAL_GPU => adapter::DeviceType::VirtualGpu,
-            ash::vk::PhysicalDeviceType::CPU => adapter::DeviceType::Cpu,
-            _ => adapter::DeviceType::Other,
-        },
-    };
-
-    let queue_families = unsafe {
-        instance
-            .inner
-            .get_physical_device_queue_family_properties(device)
-            .into_iter()
-            .enumerate()
-            .map(|(i, properties)| QueueFamily {
-                properties,
-                device,
-                index: i as u32,
-            })
-            .collect()
-    };
-
-    adapter::Adapter {
-        info,
-        physical_device,
-        queue_families,
-    }
-}
-
-impl fmt::Debug for PhysicalDevice {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("PhysicalDevice").finish()
-    }
-}
-
-impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
-    unsafe fn open(
+    /// # Safety
+    /// `raw_device` must be created from `self`
+    /// `raw_device` must be created with `requested_features`
+    pub unsafe fn gpu_from_raw(
         &self,
+        raw_device: ash::Device,
         families: &[(&QueueFamily, &[queue::QueuePriority])],
         requested_features: Features,
     ) -> Result<adapter::Gpu<Backend>, CreationError> {
-        let family_infos = families
-            .iter()
-            .map(|&(family, priorities)| {
-                vk::DeviceQueueCreateInfo::builder()
-                    .flags(vk::DeviceQueueCreateFlags::empty())
-                    .queue_family_index(family.index)
-                    .queue_priorities(priorities)
-                    .build()
-            })
-            .collect::<Vec<_>>();
+        let enabled_extensions = self.enabled_extensions(requested_features)?;
+        Ok(self.inner_create_gpu(raw_device, families, requested_features, enabled_extensions))
+    }
 
-        if !self.features().contains(requested_features) {
-            return Err(CreationError::MissingFeature);
-        }
-
-        let enabled_extensions = {
-            let (supported_extensions, unsupported_extensions) = self
-                .device_info
-                .get_required_extensions(requested_features)
-                .iter()
-                .partition::<Vec<&CStr>, _>(|&&extension| {
-                    self.device_info.supports_extension(extension)
-                });
-
-            if !unsupported_extensions.is_empty() {
-                warn!("Missing extensions: {:?}", unsupported_extensions);
-            }
-
-            debug!("Supported extensions: {:?}", supported_extensions);
-
-            supported_extensions
-        };
-
+    unsafe fn inner_create_gpu(
+        &self,
+        device_raw: ash::Device,
+        families: &[(&QueueFamily, &[queue::QueuePriority])],
+        requested_features: Features,
+        enabled_extensions: Vec<&CStr>,
+    ) -> adapter::Gpu<Backend> {
         let valid_ash_memory_types = {
             let mem_properties = self
                 .instance
@@ -842,52 +765,6 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
             .device_features
             .vulkan_1_2
             .map_or(false, |features| features.imageless_framebuffer == vk::TRUE);
-
-        // Create device
-        let device_raw = {
-            let str_pointers = enabled_extensions
-                .iter()
-                .map(|&s| {
-                    // Safe because `enabled_extensions` entries have static lifetime.
-                    s.as_ptr()
-                })
-                .collect::<Vec<_>>();
-
-            let mut enabled_features =
-                PhysicalDeviceFeatures::from_extensions_and_requested_features(
-                    self.device_info.api_version(),
-                    &enabled_extensions,
-                    requested_features,
-                    supports_vulkan12_imageless_framebuffer,
-                );
-            let info = vk::DeviceCreateInfo::builder()
-                .queue_create_infos(&family_infos)
-                .enabled_extension_names(&str_pointers);
-            let info = enabled_features.add_to_device_create_builder(info);
-
-            match self.instance.inner.create_device(self.handle, &info, None) {
-                Ok(device) => device,
-                Err(e) => {
-                    return Err(match e {
-                        vk::Result::ERROR_OUT_OF_HOST_MEMORY => {
-                            CreationError::OutOfMemory(OutOfMemory::Host)
-                        }
-                        vk::Result::ERROR_OUT_OF_DEVICE_MEMORY => {
-                            CreationError::OutOfMemory(OutOfMemory::Device)
-                        }
-                        vk::Result::ERROR_INITIALIZATION_FAILED => {
-                            CreationError::InitializationFailed
-                        }
-                        vk::Result::ERROR_DEVICE_LOST => CreationError::DeviceLost,
-                        vk::Result::ERROR_TOO_MANY_OBJECTS => CreationError::TooManyObjects,
-                        _ => {
-                            error!("Unknown device creation error: {:?}", e);
-                            CreationError::InitializationFailed
-                        }
-                    })
-                }
-            }
-        };
 
         let swapchain_fn = Swapchain::new(&self.instance.inner, &device_raw);
 
@@ -986,10 +863,163 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
             })
             .collect();
 
-        Ok(adapter::Gpu {
+        adapter::Gpu {
             device,
             queue_groups,
-        })
+        }
+    }
+
+    fn enabled_extensions(
+        &self,
+        requested_features: Features,
+    ) -> Result<Vec<&'static CStr>, CreationError> {
+        use adapter::PhysicalDevice;
+
+        if !self.features().contains(requested_features) {
+            return Err(CreationError::MissingFeature);
+        }
+
+        let (supported_extensions, unsupported_extensions) = self
+            .device_info
+            .get_required_extensions(requested_features)
+            .iter()
+            .partition::<Vec<&CStr>, _>(|&&extension| {
+                self.device_info.supports_extension(extension)
+            });
+
+        if !unsupported_extensions.is_empty() {
+            warn!("Missing extensions: {:?}", unsupported_extensions);
+        }
+
+        debug!("Supported extensions: {:?}", supported_extensions);
+
+        Ok(supported_extensions)
+    }
+}
+
+pub(crate) fn load_adapter(
+    instance: &Arc<RawInstance>,
+    device: vk::PhysicalDevice,
+) -> adapter::Adapter<Backend> {
+    let physical_device = PhysicalDevice::inner_create(instance, device);
+
+    let info = adapter::AdapterInfo {
+        name: unsafe {
+            CStr::from_ptr(physical_device.device_info.properties.device_name.as_ptr())
+                .to_str()
+                .unwrap_or("Unknown")
+                .to_owned()
+        },
+        vendor: physical_device.device_info.properties.vendor_id as usize,
+        device: physical_device.device_info.properties.device_id as usize,
+        device_type: match physical_device.device_info.properties.device_type {
+            ash::vk::PhysicalDeviceType::OTHER => adapter::DeviceType::Other,
+            ash::vk::PhysicalDeviceType::INTEGRATED_GPU => adapter::DeviceType::IntegratedGpu,
+            ash::vk::PhysicalDeviceType::DISCRETE_GPU => adapter::DeviceType::DiscreteGpu,
+            ash::vk::PhysicalDeviceType::VIRTUAL_GPU => adapter::DeviceType::VirtualGpu,
+            ash::vk::PhysicalDeviceType::CPU => adapter::DeviceType::Cpu,
+            _ => adapter::DeviceType::Other,
+        },
+    };
+
+    let queue_families = unsafe {
+        instance
+            .inner
+            .get_physical_device_queue_family_properties(device)
+            .into_iter()
+            .enumerate()
+            .map(|(i, properties)| QueueFamily {
+                properties,
+                device,
+                index: i as u32,
+            })
+            .collect()
+    };
+
+    adapter::Adapter {
+        info,
+        physical_device,
+        queue_families,
+    }
+}
+
+impl fmt::Debug for PhysicalDevice {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("PhysicalDevice").finish()
+    }
+}
+
+impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
+    unsafe fn open(
+        &self,
+        families: &[(&QueueFamily, &[queue::QueuePriority])],
+        requested_features: Features,
+    ) -> Result<adapter::Gpu<Backend>, CreationError> {
+        let family_infos = families
+            .iter()
+            .map(|&(family, priorities)| {
+                vk::DeviceQueueCreateInfo::builder()
+                    .flags(vk::DeviceQueueCreateFlags::empty())
+                    .queue_family_index(family.index)
+                    .queue_priorities(priorities)
+                    .build()
+            })
+            .collect::<Vec<_>>();
+
+        let enabled_extensions = self.enabled_extensions(requested_features)?;
+
+        let supports_vulkan12_imageless_framebuffer = self
+            .device_features
+            .vulkan_1_2
+            .map_or(false, |features| features.imageless_framebuffer == vk::TRUE);
+
+        // Create device
+        let device_raw = {
+            let str_pointers = enabled_extensions
+                .iter()
+                .map(|&s| {
+                    // Safe because `enabled_extensions` entries have static lifetime.
+                    s.as_ptr()
+                })
+                .collect::<Vec<_>>();
+
+            let mut enabled_features =
+                PhysicalDeviceFeatures::from_extensions_and_requested_features(
+                    self.device_info.api_version(),
+                    &enabled_extensions,
+                    requested_features,
+                    supports_vulkan12_imageless_framebuffer,
+                );
+            let info = vk::DeviceCreateInfo::builder()
+                .queue_create_infos(&family_infos)
+                .enabled_extension_names(&str_pointers);
+            let info = enabled_features.add_to_device_create_builder(info);
+
+            match self.instance.inner.create_device(self.handle, &info, None) {
+                Ok(device) => device,
+                Err(e) => {
+                    return Err(match e {
+                        vk::Result::ERROR_OUT_OF_HOST_MEMORY => {
+                            CreationError::OutOfMemory(OutOfMemory::Host)
+                        }
+                        vk::Result::ERROR_OUT_OF_DEVICE_MEMORY => {
+                            CreationError::OutOfMemory(OutOfMemory::Device)
+                        }
+                        vk::Result::ERROR_INITIALIZATION_FAILED => {
+                            CreationError::InitializationFailed
+                        }
+                        vk::Result::ERROR_DEVICE_LOST => CreationError::DeviceLost,
+                        vk::Result::ERROR_TOO_MANY_OBJECTS => CreationError::TooManyObjects,
+                        _ => {
+                            error!("Unknown device creation error: {:?}", e);
+                            CreationError::InitializationFailed
+                        }
+                    })
+                }
+            }
+        };
+
+        Ok(self.inner_create_gpu(device_raw, families, requested_features, enabled_extensions))
     }
 
     fn format_properties(&self, format: Option<format::Format>) -> format::Properties {
