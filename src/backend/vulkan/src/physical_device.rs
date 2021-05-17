@@ -680,10 +680,6 @@ pub struct PhysicalDevice {
 }
 
 impl PhysicalDevice {
-    pub fn raw(&self) -> vk::PhysicalDevice {
-        self.handle
-    }
-
     /// # Safety
     /// `raw_physical_device` must be created from `instance`
     pub unsafe fn from_raw(instance: Instance, raw_physical_device: vk::PhysicalDevice) -> Self {

@@ -358,10 +358,6 @@ unsafe extern "system" fn debug_report_callback(
 }
 
 impl Instance {
-    pub unsafe fn raw(&self) -> ash::Instance {
-        self.raw.inner.clone()
-    }
-
     /// # Safety
     /// `extensions` must be the list of extensions used to create `raw_instance`
     pub unsafe fn from_raw(
