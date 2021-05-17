@@ -734,7 +734,13 @@ impl PhysicalDevice {
         requested_features: Features,
     ) -> Result<adapter::Gpu<Backend>, CreationError> {
         let enabled_extensions = self.enabled_extensions(requested_features)?;
-        Ok(self.inner_create_gpu(raw_device, families, requested_features, enabled_extensions))
+        Ok(self.inner_create_gpu(
+            raw_device,
+            families,
+            requested_features,
+            enabled_extensions,
+            false,
+        ))
     }
 
     unsafe fn inner_create_gpu(
@@ -743,6 +749,7 @@ impl PhysicalDevice {
         families: &[(&QueueFamily, &[queue::QueuePriority])],
         requested_features: Features,
         enabled_extensions: Vec<&CStr>,
+        owned_handle: bool,
     ) -> adapter::Gpu<Backend> {
         let valid_ash_memory_types = {
             let mem_properties = self
@@ -819,6 +826,7 @@ impl PhysicalDevice {
         let device = Device {
             shared: Arc::new(RawDevice {
                 raw: device_raw,
+                owned_handle,
                 features: requested_features,
                 instance: Arc::clone(&self.instance),
                 extension_fns: DeviceExtensionFunctions {
@@ -1019,7 +1027,13 @@ impl adapter::PhysicalDevice<Backend> for PhysicalDevice {
             }
         };
 
-        Ok(self.inner_create_gpu(device_raw, families, requested_features, enabled_extensions))
+        Ok(self.inner_create_gpu(
+            device_raw,
+            families,
+            requested_features,
+            enabled_extensions,
+            true,
+        ))
     }
 
     fn format_properties(&self, format: Option<format::Format>) -> format::Properties {

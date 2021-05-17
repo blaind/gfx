@@ -72,6 +72,7 @@ const ROUGH_MAX_ATTACHMENT_COUNT: usize = 5;
 
 pub struct RawInstance {
     inner: ash::Instance,
+    owned_handle: bool,
     debug_messenger: Option<DebugMessenger>,
     get_physical_device_properties: Option<vk::KhrGetPhysicalDeviceProperties2Fn>,
 
@@ -97,7 +98,10 @@ impl Drop for RawInstance {
                 }
                 None => {}
             }
-            self.inner.destroy_instance(None);
+
+            if self.owned_handle {
+                self.inner.destroy_instance(None);
+            }
         }
     }
 }
@@ -366,7 +370,7 @@ impl Instance {
         raw_instance: ash::Instance,
         extensions: Vec<&'static CStr>,
     ) -> Result<Self, hal::UnsupportedBackend> {
-        Instance::inner_create(entry, raw_instance, extensions)
+        Instance::inner_create(entry, raw_instance, extensions, false)
     }
 
     fn inner_create(
@@ -374,6 +378,7 @@ impl Instance {
         #[cfg(feature = "use-rtld-next")] entry: EntryCustom<()>,
         instance: ash::Instance,
         extensions: Vec<&'static CStr>,
+        owned_handle: bool,
     ) -> Result<Self, hal::UnsupportedBackend> {
         let instance_extensions = entry
             .enumerate_instance_extension_properties()
@@ -426,6 +431,7 @@ impl Instance {
         Ok(Instance {
             raw: Arc::new(RawInstance {
                 inner: instance,
+                owned_handle,
                 debug_messenger,
                 get_physical_device_properties,
                 render_doc_entry: unsafe { load_renderdoc_entrypoint() },
@@ -614,7 +620,7 @@ impl hal::Instance<Backend> for Instance {
             })?
         };
 
-        Instance::inner_create(entry, instance, extensions)
+        Instance::inner_create(entry, instance, extensions, true)
     }
 
     fn enumerate_adapters(&self) -> Vec<adapter::Adapter<Backend>> {
@@ -791,6 +797,7 @@ impl<T> ExtensionFn<T> {
 #[doc(hidden)]
 pub struct RawDevice {
     raw: ash::Device,
+    owned_handle: bool,
     features: Features,
     instance: Arc<RawInstance>,
     extension_fns: DeviceExtensionFunctions,
@@ -810,8 +817,10 @@ impl fmt::Debug for RawDevice {
 }
 impl Drop for RawDevice {
     fn drop(&mut self) {
-        unsafe {
-            self.raw.destroy_device(None);
+        if self.owned_handle {
+            unsafe {
+                self.raw.destroy_device(None);
+            }
         }
     }
 }
