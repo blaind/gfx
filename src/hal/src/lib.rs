@@ -712,6 +712,15 @@ pub trait Instance<B: Backend>: Any + Send + Sync + Sized {
     /// # Safety
     ///
     unsafe fn destroy_surface(&self, surface: B::Surface);
+
+    /// TODO
+    fn as_raw(&self) -> B::RawInstance;
+}
+
+/// TODO
+pub trait RawInstance<B: Backend>: fmt::Debug + Any + Send + Sync {
+    /// TODO
+    unsafe fn as_ptr(&self) -> *const std::ffi::c_void;
 }
 
 /// A strongly-typed index to a particular `MemoryType`.
@@ -742,10 +751,14 @@ impl<T> Extend<T> for PseudoVec<T> {
 pub trait Backend: 'static + Sized + Eq + Clone + Hash + fmt::Debug + Any + Send + Sync {
     /// The corresponding [instance][Instance] type for this backend.
     type Instance: Instance<Self>;
+    /// TODO
+    type RawInstance: RawInstance<Self>;
     /// The corresponding [physical device][adapter::PhysicalDevice] type for this backend.
     type PhysicalDevice: adapter::PhysicalDevice<Self>;
     /// The corresponding [logical device][device::Device] type for this backend.
     type Device: device::Device<Self>;
+    /// TODO
+    type RawDevice: device::RawDevice<Self>;
     /// The corresponding [surface][window::PresentationSurface] type for this backend.
     type Surface: window::PresentationSurface<Self>;
 

@@ -719,4 +719,13 @@ pub trait Device<B: Backend>: fmt::Debug + Any + Send + Sync {
 
     /// Stops frame capture.
     fn stop_capture(&self);
+
+    /// TODO
+    fn as_raw(&self) -> B::RawDevice;
+}
+
+/// TODO
+pub trait RawDevice<B: Backend>: fmt::Debug + Any + Send + Sync {
+    /// TODO
+    unsafe fn as_ptr(&self) -> *const std::ffi::c_void;
 }

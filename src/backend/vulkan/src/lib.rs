@@ -31,7 +31,7 @@ use ash::Entry;
 use ash::{
     extensions::{ext, khr, nv::MeshShader},
     version::{DeviceV1_0, EntryV1_0, InstanceV1_0},
-    vk,
+    vk::{self, Handle},
 };
 
 use hal::{
@@ -74,6 +74,18 @@ pub struct RawInstance {
     inner: ash::Instance,
     debug_messenger: Option<DebugMessenger>,
     get_physical_device_properties: Option<vk::KhrGetPhysicalDeviceProperties2Fn>,
+}
+
+impl fmt::Debug for RawInstance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RawInstance").finish()
+    }
+}
+
+impl hal::RawInstance<Backend> for Arc<RawInstance> {
+    unsafe fn as_ptr(&self) -> *const std::ffi::c_void {
+        self.inner.handle().as_raw() as _
+    }
 }
 
 pub enum DebugMessenger {
@@ -156,6 +168,36 @@ pub struct Instance {
 
     #[cfg(feature = "use-rtld-next")]
     pub entry: EntryCustom<()>,
+}
+
+impl Instance {
+    pub fn from_raw(raw: ash::Instance) -> Result<Self, hal::UnsupportedBackend> {
+        #[cfg(not(feature = "use-rtld-next"))]
+        let entry = match unsafe { Entry::new() } {
+            Ok(entry) => entry,
+            Err(err) => {
+                info!("Missing Vulkan entry points: {:?}", err);
+                return Err(hal::UnsupportedBackend);
+            }
+        };
+
+        #[cfg(feature = "use-rtld-next")]
+        let entry = EntryCustom::new_custom((), |_, name| unsafe {
+            libc::dlsym(libc::RTLD_NEXT, name.as_ptr())
+        });
+
+        println!("x> VK_PHYSICAL_DEVICE 0x{:x}", raw.handle().as_raw());
+
+        Ok(Instance {
+            raw: Arc::new(RawInstance {
+                inner: raw,
+                debug_messenger: None,
+                get_physical_device_properties: None,
+            }),
+            extensions: Vec::new(),
+            entry,
+        })
+    }
 }
 
 impl fmt::Debug for Instance {
@@ -647,6 +689,10 @@ impl hal::Instance<Backend> for Instance {
             .functor
             .destroy_surface(surface.raw.handle, None);
     }
+
+    fn as_raw(&self) -> Arc<RawInstance> {
+        self.raw.clone()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -717,6 +763,13 @@ impl fmt::Debug for RawDevice {
         write!(f, "RawDevice") // TODO: Real Debug impl
     }
 }
+
+impl hal::device::RawDevice<Backend> for Arc<RawDevice> {
+    unsafe fn as_ptr(&self) -> *const std::ffi::c_void {
+        self.raw.handle().as_raw() as _
+    }
+}
+
 impl Drop for RawDevice {
     fn drop(&mut self) {
         unsafe {
@@ -1038,8 +1091,11 @@ pub struct Device {
 pub enum Backend {}
 impl hal::Backend for Backend {
     type Instance = Instance;
+    type RawInstance = Arc<RawInstance>;
+
     type PhysicalDevice = PhysicalDevice;
     type Device = Device;
+    type RawDevice = Arc<RawDevice>;
     type Surface = window::Surface;
 
     type QueueFamily = QueueFamily;
@@ -1071,4 +1127,33 @@ impl hal::Backend for Backend {
     type Semaphore = native::Semaphore;
     type Event = native::Event;
     type QueryPool = native::QueryPool;
+}
+
+pub use crate::native::Image;
+impl crate::native::Image {
+    pub fn from_raw(
+        raw_image: *const std::ffi::c_void,
+        kind: image::Kind,
+        view_caps: image::ViewCapabilities,
+    ) -> crate::native::Image {
+        let vk_image = vk::Image::from_raw(raw_image as u64);
+
+        let flags = conv::map_view_capabilities(view_caps);
+        let image_type = match kind {
+            image::Kind::D1(..) => vk::ImageType::TYPE_1D,
+            image::Kind::D2(..) => vk::ImageType::TYPE_2D,
+            image::Kind::D3(..) => vk::ImageType::TYPE_3D,
+        };
+
+        // FIXME: is it possible to query vk_image dimensions?
+
+        let image = crate::native::Image {
+            raw: vk_image,
+            ty: image_type,
+            flags,
+            extent: conv::map_extent(kind.extent()),
+        };
+
+        image
+    }
 }

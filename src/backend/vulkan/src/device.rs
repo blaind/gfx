@@ -1897,6 +1897,10 @@ impl d::Device<B> for super::Device {
     fn stop_capture(&self) {
         //TODO: RenderDoc
     }
+
+    fn as_raw(&self) -> Arc<super::RawDevice> {
+        self.shared.clone()
+    }
 }
 
 impl super::Device {
