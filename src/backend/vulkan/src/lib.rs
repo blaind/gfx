@@ -542,6 +542,15 @@ impl Instance {
             entry,
         })
     }
+
+    /// # Safety
+    /// `raw_physical_device` must be created from `self` (or from the inner raw handle)
+    pub unsafe fn adapter_from_raw(
+        &self,
+        raw_physical_device: vk::PhysicalDevice,
+    ) -> adapter::Adapter<Backend> {
+        physical_device::load_adapter(&self.raw, raw_physical_device)
+    }
 }
 
 impl hal::Instance<Backend> for Instance {
