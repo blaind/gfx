@@ -31,7 +31,7 @@ use ash::Entry;
 use ash::{
     extensions::{ext, khr, nv::MeshShader},
     version::{DeviceV1_0, EntryV1_0, InstanceV1_0},
-    vk,
+    vk, EntryCustom,
 };
 
 use hal::{
@@ -52,9 +52,6 @@ use std::{
     sync::Arc,
     thread, unreachable,
 };
-
-#[cfg(feature = "use-rtld-next")]
-use ash::EntryCustom;
 
 mod command;
 mod conv;
@@ -358,24 +355,133 @@ unsafe extern "system" fn debug_report_callback(
 }
 
 impl Instance {
+    pub fn required_extensions<L>(
+        entry: &EntryCustom<L>,
+        driver_api_version: Version,
+    ) -> Result<Vec<&'static CStr>, hal::UnsupportedBackend> {
+        let instance_extensions = entry
+            .enumerate_instance_extension_properties()
+            .map_err(|e| {
+                info!("Unable to enumerate instance extensions: {:?}", e);
+                hal::UnsupportedBackend
+            })?;
+
+        // Check our extensions against the available extensions
+        let mut extensions: Vec<&'static CStr> = Vec::new();
+        extensions.push(khr::Surface::name());
+
+        // Platform-specific WSI extensions
+        if cfg!(all(
+            unix,
+            not(target_os = "android"),
+            not(target_os = "macos")
+        )) {
+            extensions.push(khr::XlibSurface::name());
+            extensions.push(khr::XcbSurface::name());
+            extensions.push(khr::WaylandSurface::name());
+        }
+        if cfg!(target_os = "android") {
+            extensions.push(khr::AndroidSurface::name());
+        }
+        if cfg!(target_os = "windows") {
+            extensions.push(khr::Win32Surface::name());
+        }
+        if cfg!(target_os = "macos") {
+            extensions.push(ash::extensions::mvk::MacOSSurface::name());
+        }
+
+        extensions.push(ext::DebugUtils::name());
+        if cfg!(debug_assertions) {
+            #[allow(deprecated)]
+            extensions.push(ext::DebugReport::name());
+        }
+
+        extensions.push(vk::KhrGetPhysicalDeviceProperties2Fn::name());
+
+        // VK_KHR_storage_buffer_storage_class required for `Naga` on Vulkan 1.0 devices
+        if driver_api_version == Version::V1_0 {
+            extensions.push(vk::KhrStorageBufferStorageClassFn::name());
+        }
+
+        // Only keep available extensions.
+        extensions.retain(|&ext| {
+            if instance_extensions
+                .iter()
+                .find(|inst_ext| unsafe { CStr::from_ptr(inst_ext.extension_name.as_ptr()) == ext })
+                .is_some()
+            {
+                true
+            } else {
+                info!("Unable to find extension: {}", ext.to_string_lossy());
+                false
+            }
+        });
+        Ok(extensions)
+    }
+
+    pub fn required_layers<L>(
+        entry: &EntryCustom<L>,
+    ) -> Result<Vec<&'static CStr>, hal::UnsupportedBackend> {
+        let instance_layers = entry.enumerate_instance_layer_properties().map_err(|e| {
+            info!("Unable to enumerate instance layers: {:?}", e);
+            hal::UnsupportedBackend
+        })?;
+
+        // Check requested layers against the available layers
+        let mut layers: Vec<&'static CStr> = Vec::new();
+        if cfg!(debug_assertions) {
+            layers.push(CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap());
+        }
+
+        // Only keep available layers.
+        layers.retain(|&layer| {
+            if instance_layers
+                .iter()
+                .find(|inst_layer| unsafe {
+                    CStr::from_ptr(inst_layer.layer_name.as_ptr()) == layer
+                })
+                .is_some()
+            {
+                true
+            } else {
+                warn!("Unable to find layer: {}", layer.to_string_lossy());
+                false
+            }
+        });
+        Ok(layers)
+    }
+
     /// # Safety
-    /// `extensions` must be the list of extensions used to create `raw_instance`
+    /// `raw_instance` must be created using at least the extensions provided by `Instance::required_extensions()`
+    /// and the layers provided by `Instance::required_extensions()`.
+    /// `driver_api_version` must match the version used to create `raw_instance`.
+    /// `extensions` must match the extensions used to create `raw_instance`.
+    /// `raw_instance` must be manually destroyed *after* gfx-hal Instance has been dropped.
     pub unsafe fn from_raw(
         #[cfg(not(feature = "use-rtld-next"))] entry: Entry,
         #[cfg(feature = "use-rtld-next")] entry: EntryCustom<()>,
         raw_instance: ash::Instance,
+        driver_api_version: Version,
         extensions: Vec<&'static CStr>,
     ) -> Result<Self, hal::UnsupportedBackend> {
-        Instance::inner_create(entry, raw_instance, extensions, false)
+        Instance::inner_create(entry, raw_instance, false, driver_api_version, extensions)
     }
 
     fn inner_create(
         #[cfg(not(feature = "use-rtld-next"))] entry: Entry,
         #[cfg(feature = "use-rtld-next")] entry: EntryCustom<()>,
         instance: ash::Instance,
-        extensions: Vec<&'static CStr>,
         owned_handle: bool,
+        driver_api_version: Version,
+        extensions: Vec<&'static CStr>,
     ) -> Result<Self, hal::UnsupportedBackend> {
+        if driver_api_version == Version::V1_0
+            && !extensions.contains(&vk::KhrStorageBufferStorageClassFn::name())
+        {
+            warn!("Unable to create Vulkan instance. Required VK_KHR_storage_buffer_storage_class extension is not supported");
+            return Err(hal::UnsupportedBackend);
+        }
+
         let instance_extensions = entry
             .enumerate_instance_extension_properties()
             .map_err(|e| {
@@ -494,105 +600,9 @@ impl hal::Instance<Backend> for Instance {
                 .into()
             });
 
-        let instance_extensions = entry
-            .enumerate_instance_extension_properties()
-            .map_err(|e| {
-                info!("Unable to enumerate instance extensions: {:?}", e);
-                hal::UnsupportedBackend
-            })?;
+        let extensions = Instance::required_extensions(&entry, driver_api_version)?;
 
-        let instance_layers = entry.enumerate_instance_layer_properties().map_err(|e| {
-            info!("Unable to enumerate instance layers: {:?}", e);
-            hal::UnsupportedBackend
-        })?;
-
-        // Check our extensions against the available extensions
-        let extensions = {
-            let mut extensions: Vec<&'static CStr> = Vec::new();
-            extensions.push(khr::Surface::name());
-
-            // Platform-specific WSI extensions
-            if cfg!(all(
-                unix,
-                not(target_os = "android"),
-                not(target_os = "macos")
-            )) {
-                extensions.push(khr::XlibSurface::name());
-                extensions.push(khr::XcbSurface::name());
-                extensions.push(khr::WaylandSurface::name());
-            }
-            if cfg!(target_os = "android") {
-                extensions.push(khr::AndroidSurface::name());
-            }
-            if cfg!(target_os = "windows") {
-                extensions.push(khr::Win32Surface::name());
-            }
-            if cfg!(target_os = "macos") {
-                extensions.push(ash::extensions::mvk::MacOSSurface::name());
-            }
-
-            extensions.push(ext::DebugUtils::name());
-            if cfg!(debug_assertions) {
-                #[allow(deprecated)]
-                extensions.push(ext::DebugReport::name());
-            }
-
-            extensions.push(vk::KhrGetPhysicalDeviceProperties2Fn::name());
-
-            // VK_KHR_storage_buffer_storage_class required for `Naga` on Vulkan 1.0 devices
-            if driver_api_version == Version::V1_0 {
-                extensions.push(vk::KhrStorageBufferStorageClassFn::name());
-            }
-
-            // Only keep available extensions.
-            extensions.retain(|&ext| {
-                if instance_extensions
-                    .iter()
-                    .find(|inst_ext| unsafe {
-                        CStr::from_ptr(inst_ext.extension_name.as_ptr()) == ext
-                    })
-                    .is_some()
-                {
-                    true
-                } else {
-                    info!("Unable to find extension: {}", ext.to_string_lossy());
-                    false
-                }
-            });
-            extensions
-        };
-
-        if driver_api_version == Version::V1_0
-            && !extensions.contains(&vk::KhrStorageBufferStorageClassFn::name())
-        {
-            warn!("Unable to create Vulkan instance. Required VK_KHR_storage_buffer_storage_class extension is not supported");
-            return Err(hal::UnsupportedBackend);
-        }
-
-        // Check requested layers against the available layers
-        let layers = {
-            let mut layers: Vec<&'static CStr> = Vec::new();
-            if cfg!(debug_assertions) {
-                layers.push(CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap());
-            }
-
-            // Only keep available layers.
-            layers.retain(|&layer| {
-                if instance_layers
-                    .iter()
-                    .find(|inst_layer| unsafe {
-                        CStr::from_ptr(inst_layer.layer_name.as_ptr()) == layer
-                    })
-                    .is_some()
-                {
-                    true
-                } else {
-                    warn!("Unable to find layer: {}", layer.to_string_lossy());
-                    false
-                }
-            });
-            layers
-        };
+        let layers = Instance::required_layers(&entry)?;
 
         let instance = {
             let str_pointers = layers
@@ -616,7 +626,7 @@ impl hal::Instance<Backend> for Instance {
             })?
         };
 
-        Instance::inner_create(entry, instance, extensions, true)
+        Instance::inner_create(entry, instance, true, driver_api_version, extensions)
     }
 
     fn enumerate_adapters(&self) -> Vec<adapter::Adapter<Backend>> {
