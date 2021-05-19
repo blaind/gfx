@@ -1921,6 +1921,10 @@ impl d::Device<B> for super::Device {
 }
 
 impl super::Device {
+    pub fn raw(&self) -> ash::Device {
+        self.shared.raw.clone()
+    }
+
     /// We only work with a subset of Ash-exposed memory types that we know.
     /// This function filters an ash mask into our mask.
     fn filter_memory_requirements(&self, ash_mask: u32) -> u32 {

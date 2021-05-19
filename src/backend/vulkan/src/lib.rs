@@ -57,7 +57,7 @@ mod command;
 mod conv;
 mod device;
 mod info;
-mod native;
+pub mod native;
 mod physical_device;
 mod pool;
 mod window;
@@ -355,6 +355,10 @@ unsafe extern "system" fn debug_report_callback(
 }
 
 impl Instance {
+    pub fn raw(&self) -> &ash::Instance {
+        &self.raw.inner
+    }
+
     pub fn required_extensions<L>(
         entry: &EntryCustom<L>,
         driver_api_version: Version,

@@ -1,5 +1,8 @@
 use crate::{Backend, RawDevice, ROUGH_MAX_ATTACHMENT_COUNT};
-use ash::{version::DeviceV1_0, vk};
+use ash::{
+    version::DeviceV1_0,
+    vk::{self, Handle},
+};
 use hal::{
     device::OutOfMemory,
     image::{Extent, SubresourceRange},
@@ -49,6 +52,34 @@ pub struct Image {
     pub(crate) ty: vk::ImageType,
     pub(crate) flags: vk::ImageCreateFlags,
     pub(crate) extent: vk::Extent3D,
+}
+
+impl Image {
+    pub fn from_raw(
+        raw_image: *const std::ffi::c_void,
+        kind: crate::image::Kind,
+        view_caps: crate::image::ViewCapabilities,
+    ) -> crate::native::Image {
+        let vk_image = vk::Image::from_raw(raw_image as u64);
+
+        let flags = crate::conv::map_view_capabilities(view_caps);
+        let image_type = match kind {
+            crate::image::Kind::D1(..) => vk::ImageType::TYPE_1D,
+            crate::image::Kind::D2(..) => vk::ImageType::TYPE_2D,
+            crate::image::Kind::D3(..) => vk::ImageType::TYPE_3D,
+        };
+
+        // FIXME: is it possible to query vk_image dimensions?
+
+        let image = crate::native::Image {
+            raw: vk_image,
+            ty: image_type,
+            flags,
+            extent: crate::conv::map_extent(kind.extent()),
+        };
+
+        image
+    }
 }
 
 #[derive(Debug, Hash, PartialEq, Eq)]
