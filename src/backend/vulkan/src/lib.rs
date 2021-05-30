@@ -56,7 +56,7 @@ use std::{
 };
 
 mod command;
-mod conv;
+pub mod conv;
 mod device;
 mod info;
 pub mod native;

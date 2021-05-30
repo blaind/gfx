@@ -53,9 +53,9 @@ pub struct Image {
 
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub struct ImageView {
-    pub(crate) image: vk::Image,
-    pub(crate) raw: vk::ImageView,
-    pub(crate) range: SubresourceRange,
+    pub image: vk::Image,
+    pub raw: vk::ImageView,
+    pub range: SubresourceRange,
 }
 
 #[derive(Debug, Hash)]

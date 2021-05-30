@@ -41,7 +41,7 @@ mod command;
 mod conv;
 mod device;
 mod info;
-mod native;
+pub mod native;
 mod pool;
 mod queue;
 mod state;
